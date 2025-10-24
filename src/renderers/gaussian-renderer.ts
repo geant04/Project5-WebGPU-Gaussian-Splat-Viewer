@@ -38,7 +38,7 @@ export default function get_renderer(
   // Somehow we need to know the number of splats there are, no?
   // This needs to be updated dynamically by the GPU culling stage
   const numSplats = pc.num_points;
-  const floatsPerSplat = 4 + 4;
+  const floatsPerSplat = 4 + 4 + 4;
   const splats = new Float32Array(numSplats * floatsPerSplat);
   const splatStorageBuffer = device.createBuffer({
     label: "splats",
@@ -63,7 +63,6 @@ export default function get_renderer(
   const gaussian_shader = device.createShaderModule({code: gaussianWGSL });
   let preprocess_pipeline;
   let gaussian_bind_group;
-  let splat_bind_group;
   let sort_bind_group;
 
   if (testPreProcess)
@@ -80,6 +79,11 @@ export default function get_renderer(
           binding: 1,
           visibility: GPUShaderStage.COMPUTE,
           buffer: { type: "storage"}
+        },
+        {
+          binding: 2,
+          visibility: GPUShaderStage.COMPUTE,
+          buffer: { type: "uniform" }
         }
       ]
     });
@@ -95,11 +99,14 @@ export default function get_renderer(
         {
           binding: 1,
           resource: { buffer: splatStorageBuffer }
+        },
+        {
+          binding: 2,
+          resource: { buffer: camera_buffer }
         }
       ]
     });
 
-    
     const sortBindGroupLayout = device.createBindGroupLayout({
       label: "sort bind group layout",
       // there is apparently some need for all of these buffers to be read/write that I don't understand yet
@@ -161,9 +168,43 @@ export default function get_renderer(
   // ===============================================
   //    Create Render Pipeline and Bind Groups
   // ===============================================
+
+  const splatDrawBindGroupLayout = device.createBindGroupLayout({
+    label: "splat draw bind group layout",
+    entries: [
+      {
+        binding: 0,
+        visibility: GPUShaderStage.VERTEX | GPUShaderStage.FRAGMENT,
+        buffer: { type: "read-only-storage" }
+      },
+      {
+        binding: 1,
+        visibility: GPUShaderStage.VERTEX | GPUShaderStage.FRAGMENT,
+        buffer: { type: "uniform" }
+      }
+    ]
+  });
+
+  const splatDrawBindGroup = device.createBindGroup({
+    label: "draw splat bind group",
+    layout: splatDrawBindGroupLayout,
+    entries: [
+      {
+        binding: 0,
+        resource: { buffer: splatStorageBuffer}
+      },
+      {
+        binding: 1,
+        resource: { buffer: camera_buffer}
+      }
+    ]
+  });
+
   const splatPipeline = device.createRenderPipeline({
     label: 'render',
-    layout: 'auto',
+    layout: device.createPipelineLayout({
+      bindGroupLayouts: [splatDrawBindGroupLayout]
+    }),
     vertex: {
       module: gaussian_shader,
       entryPoint: 'vs_main',
@@ -218,6 +259,7 @@ export default function get_renderer(
     // - Gaussian 3D buffer
 
     // indirect draw thing mi bombaclat
+    pass.setBindGroup(0, splatDrawBindGroup);
     pass.drawIndirect(indirectDrawBuffer, 0);
 
     pass.end();

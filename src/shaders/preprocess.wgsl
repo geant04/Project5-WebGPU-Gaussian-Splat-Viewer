@@ -59,12 +59,14 @@ struct Splat {
     //TODO: store information for 2D splat rendering
     radius: f32,
     ndc_position: vec2f,
+    color: vec4f,
     conicAndOpacity: vec4f
 };
 
 //TODO: bind your data here
 @group(0) @binding(0) var<storage, read> gaussians : array<Gaussian>;
 @group(0) @binding(1) var<storage, read_write> splats : array<Splat>;
+@group(0) @binding(2) var<uniform> camera: CameraUniforms;
 
 @group(1) @binding(0) var<storage, read_write> sort_infos: SortInfos;
 @group(1) @binding(1) var<storage, read_write> sort_depths : array<u32>;
@@ -123,9 +125,9 @@ fn quaternionToRotationMatrix(quaternion: vec4f) -> mat3x3f {
     let y = quaternion.z;
     let z = quaternion.w;
 
-    let column0 = vec3f(1f - 2f * (y * y + z * z), 2f * (x * y - r * z), 2f * (x * z + r * y));
-    let column1 = vec3f(2f * (x * y + r * z), 1f - 2f * (x * x + z * z), 2f * (y * z - r * x));
-    let column2 = vec3f(2f * (x * z - r * y), 2f * (y * z + r * x), 1f - 2f * (x * x + y * y));
+    let column0 = vec3f(1f - 2f * (y * y + z * z), 2f * (x * y + r * z), 2f * (x * z - r * y));
+    let column1 = vec3f(2f * (x * y - r * z), 1f - 2f * (x * x + z * z), 2f * (y * z + r * x));
+    let column2 = vec3f(2f * (x * z + r * y), 2f * (y * z - r * x), 1f - 2f * (x * x + y * y));
 
     return mat3x3f(
         column0,
@@ -135,8 +137,6 @@ fn quaternionToRotationMatrix(quaternion: vec4f) -> mat3x3f {
 }
 
 fn buildScaleMatrix(scale: vec4f) -> mat3x3f {
-    let scaleMatrix = glm::mat3x3f(1f);
-
     // somehow grab gaussian uniforms when it's populated
     let column0 = vec3f(scale.x, 0f, 0f);
     let column1 = vec3f(0f, scale.y, 0f);
@@ -157,12 +157,12 @@ fn preprocess(@builtin(global_invocation_id) gid: vec3<u32>, @builtin(num_workgr
     let worldPos = vec4<f32>(xy[0], xy[1], za[0], 1.);
 
     // Project gaussian world position to NDC?
-    let projPosW : vec4f = proj * view * vec4f(worldPos);
+    let projPosW : vec4f = camera.proj * camera.view * vec4f(worldPos);
     let projPos : vec4f = projPosW / projPosW.w;
 
     // Compute covariance 3D matrix
-    let quaternion : vec4f = (unpack2x16float(gaussian.rot[0]), unpack2x16float(gaussian.rot[1]));
-    let scale : vec4f = (unpack2x16float(gaussian.scale[0], unpack2x16float(gaussian.scale[1])));
+    let quaternion : vec4f = vec4f(unpack2x16float(gaussian.rot[0]), unpack2x16float(gaussian.rot[1]));
+    let scale : vec4f = vec4f(unpack2x16float(gaussian.scale[0]), unpack2x16float(gaussian.scale[1]));
 
     let rotMat = quaternionToRotationMatrix(quaternion);
     let scaleMat = buildScaleMatrix(scale);
@@ -170,8 +170,71 @@ fn preprocess(@builtin(global_invocation_id) gid: vec3<u32>, @builtin(num_workgr
     let m : mat3x3f = scaleMat * rotMat;
     let sigma : mat3x3f = transpose(m) * m;
 
-    let cov3D : mat3x3f = 
+    // Cov3D construction
+    let cov3DA = vec4f(sigma[0][0], sigma[0][1], sigma[0][2], sigma[1][0]);
+    let cov3DB = vec4f(sigma[1][1], sigma[1][2], 0f, 0f);
 
+    // Cov2D computation
+    var t : vec3f = (camera.view * worldPos).xyz;
+    let xInvTanFOVDiv2 = camera.proj[0][0];
+    let yInvTanFOVDiv2 = camera.proj[1][1];
+    
+    let limX = 1.3f * (1.0f / xInvTanFOVDiv2);
+    let limY = 1.3f * (1.0f / yInvTanFOVDiv2);
+    let txtz = t.x / t.z;
+    let tytz = t.y / t.z;
+
+    t.x = min(limX, max(-limX, txtz)) * t.z;
+    t.y = min(limY, max(-limY, tytz)) * t.z;
+
+    // I'm just going to let God take care of this one!
+    let J : mat3x3f = mat3x3f(
+        vec3f(camera.focal.x / t.z, 0f, -(camera.focal.x * t.x) / (t.z * t.z)),
+        vec3f(0f, camera.focal.y / t.z, -(camera.focal.y * t.y) / (t.z * t.z)),
+        vec3f(0f, 0f, 0f)
+    );
+
+    let W : mat3x3f = mat3x3f(
+        vec3f(camera.view[0][0], camera.view[0][1], camera.view[0][2]),
+        vec3f(camera.view[1][0], camera.view[1][1], camera.view[1][2]),
+        vec3f(camera.view[2][0], camera.view[2][1], camera.view[2][2])
+    );
+
+    let T : mat3x3f = W * J;
+    let Vrk : mat3x3f = mat3x3f(
+        vec3f(cov3DA.x, cov3DA.y, cov3DA.z),
+        vec3f(cov3DA.y, cov3DA.w, cov3DB.x),
+        vec3f(cov3DA.z, cov3DB.x, cov3DB.y)
+    );
+
+    var cov : mat3x3f = J * W * Vrk * transpose(W) * transpose(J);
+    cov[0][0] += 0.3f;
+    cov[1][1] += 0.3f;
+
+    let cov2D = vec3f(cov[0][0], cov[0][1], cov[1][1]);
+
+    // Invert covariance part???
+    let det = (cov2D.x * cov2D.z - cov2D.y * cov2D.y);
+
+    // Something, something, non-invertible...
+    if (det == 0f) {
+        return;
+    }
+
+    let detInv : f32 = 1f / det;
+    let conic : vec3f = detInv * vec3f(cov2D.z, -cov2D.y, cov2D.x);
+    let mid = 0.5f * (cov2D.x + cov2D.z);
+    let lambda1 = mid + sqrt(max(0.1f, mid * mid - det));
+    let lambda2 = mid - sqrt(max(0.1f, mid * mid - det));
+
+    let radius = ceil(3f * sqrt(max(lambda1, lambda2)));
+    let ndc_position = vec2f(projPos.x, projPos.y);
+    let color : vec3f = computeColorFromSH(normalize(worldPos.xyz), idx, 0u);
+
+    splats[idx].radius = radius;
+    splats[idx].ndc_position = ndc_position;
+    splats[idx].color = vec4f(color, 1f);
+    splats[idx].conicAndOpacity = vec4f(conic, za[1]);
 
     let keys_per_dispatch = workgroupSize * sortKeyPerThread; 
     // increment DispatchIndirect.dispatchx each time you reach limit for one dispatch of keys

@@ -5,18 +5,32 @@ struct VertexOutput {
 
 struct Splat {
     //TODO: information defined in preprocess compute shader
-    // position
-    // scale
-    // rotation
-    // color
-    // opacity
     radius: f32,
     ndc_position: vec2f,
+    color: vec4f,
     conicAndOpacity: vec4f
 };
 
+struct Gaussian {
+    pos_opacity: array<u32,2>,
+    rot: array<u32,2>,
+    scale: array<u32,2>
+};
+
+struct CameraUniforms {
+    view: mat4x4<f32>,
+    view_inv: mat4x4<f32>,
+    proj: mat4x4<f32>,
+    proj_inv: mat4x4<f32>,
+    viewport: vec2<f32>,
+    focal: vec2<f32>
+};
+
+@group(0) @binding(0) var<storage, read> splats : array<Splat>;
+@group(0) @binding(1) var<uniform> camera: CameraUniforms;
+
 @vertex
-fn vs_main( @builtin(vertex_index) VertexIndex: u32 ) -> VertexOutput {
+fn vs_main( @builtin(vertex_index) vertexIndex: u32, @builtin(instance_index) instanceIndex: u32 ) -> VertexOutput {
     //TODO: reconstruct 2D quad based on information from splat, pass 
     var out: VertexOutput;
 
@@ -26,8 +40,9 @@ fn vs_main( @builtin(vertex_index) VertexIndex: u32 ) -> VertexOutput {
     );
 
     const smallRadius = 0.01f;
+    let splatPosition: vec2f = splats[instanceIndex].ndc_position;
 
-    out.position = vec4f(pos[VertexIndex] * smallRadius , 0f, 1f);
+    out.position = vec4f(pos[vertexIndex] * smallRadius + splatPosition, 0f, 1f);
 
     //out.position = vec4<f32>(1. ,1. , 0., 1.);
     return out;
