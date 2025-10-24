@@ -50,24 +50,26 @@ struct RenderSettings {
 }
 
 struct Gaussian {
-    pos_opacity: array<u32,2>,
+    packedPositionOpacity: array<u32,2>,
     rot: array<u32,2>,
     scale: array<u32,2>
 };
 
 struct Splat {
     //TODO: store information for 2D splat rendering
+    radius: f32,
+    ndc_position: vec2f,
+    conicAndOpacity: vec4f
 };
 
 //TODO: bind your data here
-@group(2) @binding(0)
-var<storage, read_write> sort_infos: SortInfos;
-@group(2) @binding(1)
-var<storage, read_write> sort_depths : array<u32>;
-@group(2) @binding(2)
-var<storage, read_write> sort_indices : array<u32>;
-@group(2) @binding(3)
-var<storage, read_write> sort_dispatch: DispatchIndirect;
+@group(0) @binding(0) var<storage, read> gaussians : array<Gaussian>;
+@group(0) @binding(1) var<storage, read_write> splats : array<Splat>;
+
+@group(1) @binding(0) var<storage, read_write> sort_infos: SortInfos;
+@group(1) @binding(1) var<storage, read_write> sort_depths : array<u32>;
+@group(1) @binding(2) var<storage, read_write> sort_indices : array<u32>;
+@group(1) @binding(3) var<storage, read_write> sort_dispatch: DispatchIndirect;
 
 /// reads the ith sh coef from the storage buffer 
 fn sh_coef(splat_idx: u32, c_idx: u32) -> vec3<f32> {
@@ -108,11 +110,71 @@ fn computeColorFromSH(dir: vec3<f32>, v_idx: u32, sh_deg: u32) -> vec3<f32> {
     return  max(vec3<f32>(0.), result);
 }
 
+fn computeGaussianBBIntersection(position: vec3f, viewMatrix: mat4x4f, projMatrix: mat4x4f, pView: vec3f) -> bool {
+    // points to screenspace
+    return true;
+}
+
+
+fn quaternionToRotationMatrix(quaternion: vec4f) -> mat3x3f {
+    // I don't like this, but it's the style of the Inria paper code
+    let r = quaternion.x;
+    let x = quaternion.y;
+    let y = quaternion.z;
+    let z = quaternion.w;
+
+    let column0 = vec3f(1f - 2f * (y * y + z * z), 2f * (x * y - r * z), 2f * (x * z + r * y));
+    let column1 = vec3f(2f * (x * y + r * z), 1f - 2f * (x * x + z * z), 2f * (y * z - r * x));
+    let column2 = vec3f(2f * (x * z - r * y), 2f * (y * z + r * x), 1f - 2f * (x * x + y * y));
+
+    return mat3x3f(
+        column0,
+        column1,
+        column2
+    );
+}
+
+fn buildScaleMatrix(scale: vec4f) -> mat3x3f {
+    let scaleMatrix = glm::mat3x3f(1f);
+
+    // somehow grab gaussian uniforms when it's populated
+    let column0 = vec3f(scale.x, 0f, 0f);
+    let column1 = vec3f(0f, scale.y, 0f);
+    let column2 = vec3f(0f, 0f, scale.z);
+    return mat3x3f(column0, column1, column2);
+}
+
 @compute @workgroup_size(workgroupSize,1,1)
 fn preprocess(@builtin(global_invocation_id) gid: vec3<u32>, @builtin(num_workgroups) wgs: vec3<u32>) {
     let idx = gid.x;
-    //TODO: set up pipeline as described in instruction
+
+    // TODO: set up pipeline as described in instruction
+    // Somehow... we do frustum culling
+    let gaussian = gaussians[idx];
+
+    let xy = unpack2x16float(gaussian.packedPositionOpacity[0]);
+    let za = unpack2x16float(gaussian.packedPositionOpacity[1]);
+    let worldPos = vec4<f32>(xy[0], xy[1], za[0], 1.);
+
+    // Project gaussian world position to NDC?
+    let projPosW : vec4f = proj * view * vec4f(worldPos);
+    let projPos : vec4f = projPosW / projPosW.w;
+
+    // Compute covariance 3D matrix
+    let quaternion : vec4f = (unpack2x16float(gaussian.rot[0]), unpack2x16float(gaussian.rot[1]));
+    let scale : vec4f = (unpack2x16float(gaussian.scale[0], unpack2x16float(gaussian.scale[1])));
+
+    let rotMat = quaternionToRotationMatrix(quaternion);
+    let scaleMat = buildScaleMatrix(scale);
+
+    let m : mat3x3f = scaleMat * rotMat;
+    let sigma : mat3x3f = transpose(m) * m;
+
+    let cov3D : mat3x3f = 
+
 
     let keys_per_dispatch = workgroupSize * sortKeyPerThread; 
     // increment DispatchIndirect.dispatchx each time you reach limit for one dispatch of keys
+
+    // dude what the hell is dispatchIndirect and why does the base code just not talk about it at all??
 }
