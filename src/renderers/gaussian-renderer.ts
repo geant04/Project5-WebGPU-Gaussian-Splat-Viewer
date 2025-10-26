@@ -57,13 +57,22 @@ export default function get_renderer(
   });
   device.queue.writeBuffer(indirectDrawBuffer, 0, indirectDrawArgs);
 
+  const renderSettingsBuffer = device.createBuffer({
+    label: "renderSettings buffer",
+    size: 4 + 4,
+    usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST
+  });
+
+  device.queue.writeBuffer(renderSettingsBuffer, 0, new Float32Array([1, pc.sh_deg]));
+
   // ===============================================
   //    Create Compute Pipeline and Bind Groups
   // ===============================================
   const gaussian_shader = device.createShaderModule({code: gaussianWGSL });
-  let preprocess_pipeline;
-  let gaussian_bind_group;
-  let sort_bind_group;
+  let preprocessPipeline;
+  let gaussianBindGroup;
+  let sortBindGroupLayout;
+  let sortBindGroup;
 
   if (testPreProcess)
   {
@@ -84,11 +93,21 @@ export default function get_renderer(
           binding: 2,
           visibility: GPUShaderStage.COMPUTE,
           buffer: { type: "uniform" }
+        },
+        {
+          binding: 3,
+          visibility: GPUShaderStage.COMPUTE,
+          buffer: { type: "read-only-storage" }
+        },
+        {
+          binding: 4,
+          visibility: GPUShaderStage.COMPUTE,
+          buffer: { type: "uniform" }
         }
       ]
     });
 
-    gaussian_bind_group = device.createBindGroup({
+    gaussianBindGroup = device.createBindGroup({
       label: 'gaussian bind group',
       layout: gaussianBindGroupLayout,
       entries: [
@@ -103,11 +122,19 @@ export default function get_renderer(
         {
           binding: 2,
           resource: { buffer: camera_buffer }
+        },
+        {
+          binding: 3,
+          resource: { buffer: pc.sh_buffer }
+        },
+        {
+          binding: 4,
+          resource: { buffer: renderSettingsBuffer }
         }
       ]
     });
 
-    const sortBindGroupLayout = device.createBindGroupLayout({
+    sortBindGroupLayout = device.createBindGroupLayout({
       label: "sort bind group layout",
       // there is apparently some need for all of these buffers to be read/write that I don't understand yet
       entries: [
@@ -134,7 +161,7 @@ export default function get_renderer(
       ]
     });
 
-    sort_bind_group = device.createBindGroup({
+    sortBindGroup = device.createBindGroup({
       label: 'sort bind group',
       layout: sortBindGroupLayout,
       entries: [
@@ -145,7 +172,7 @@ export default function get_renderer(
       ],
     });
 
-    preprocess_pipeline = device.createComputePipeline({
+    preprocessPipeline = device.createComputePipeline({
       label: 'preprocess',
       layout: device.createPipelineLayout({
         bindGroupLayouts: [
@@ -181,6 +208,11 @@ export default function get_renderer(
         binding: 1,
         visibility: GPUShaderStage.VERTEX | GPUShaderStage.FRAGMENT,
         buffer: { type: "uniform" }
+      },
+      {
+        binding: 2,
+        visibility: GPUShaderStage.VERTEX,
+        buffer: { type: "read-only-storage" }
       }
     ]
   });
@@ -196,6 +228,10 @@ export default function get_renderer(
       {
         binding: 1,
         resource: { buffer: camera_buffer}
+      },
+      {
+        binding: 2,
+        resource: { buffer: sorter.ping_pong[0].sort_indices_buffer }
       }
     ]
   });
@@ -212,7 +248,23 @@ export default function get_renderer(
     fragment: {
       module: gaussian_shader,
       entryPoint: 'fs_main',
-      targets: [{ format: presentation_format }],
+      targets: [
+        { 
+          format: presentation_format,
+          blend: {
+            color: {
+              srcFactor: 'one',
+              dstFactor: 'one-minus-src-alpha',
+              operation: 'add'
+            },
+            alpha: {
+              srcFactor: 'one',
+              dstFactor: 'one-minus-src-alpha',
+              operation: 'add'
+            }
+          }
+        }
+      ],
     },
     primitive: {
       topology: 'triangle-list',
@@ -223,23 +275,6 @@ export default function get_renderer(
   //    Command Encoder Functions
   // ===============================================
   const render = (encoder: GPUCommandEncoder, texture_view: GPUTextureView) => {
-
-    // Need to dispatch the compute pass.
-    // For now, this shouldn't do anything meaningful, and if it's wrong then we deal with that later
-    if (testPreProcess)
-    {
-      const computePass = encoder.beginComputePass({
-        label: 'pre-process compute pass'
-      });
-
-      computePass.setPipeline(preprocess_pipeline);
-      computePass.setBindGroup(0, gaussian_bind_group);
-      computePass.setBindGroup(1, sort_bind_group);
-      computePass.dispatchWorkgroups(Math.ceil(pc.num_points / C.histogram_wg_size), 1, 1);
-      computePass.end();
-    }
-    
-
     // After this point, and after culling, we should have our num points properly found and updated?
     const pass = encoder.beginRenderPass({
       label: 'gaussian quad renderer',
@@ -253,12 +288,6 @@ export default function get_renderer(
     });
     
     pass.setPipeline(splatPipeline);
-
-    // Our only buffers to care about are:
-    // - Camera buffer
-    // - Gaussian 3D buffer
-
-    // indirect draw thing mi bombaclat
     pass.setBindGroup(0, splatDrawBindGroup);
     pass.drawIndirect(indirectDrawBuffer, 0);
 
@@ -270,7 +299,39 @@ export default function get_renderer(
   // ===============================================
   return {
     frame: (encoder: GPUCommandEncoder, texture_view: GPUTextureView) => {
-      // TODO: Figure out how this sorter thing works
+      // Wipe out buffers, but only the first element I think
+      // In this case:
+      //  sort_info_buffer -> clear key_size, which is the first element (4 bytes, 0 offset)
+      //  sort_dispatch_indirect_buffer -> clear dispatch_x, which is also the first element
+      encoder.clearBuffer(sorter.sort_info_buffer, 0, 4);
+      encoder.clearBuffer(sorter.sort_dispatch_indirect_buffer, 0, 4);
+
+      // Need to dispatch the compute pass.
+      if (testPreProcess)
+      {
+        const computePass = encoder.beginComputePass({
+          label: 'pre-process compute pass'
+        });
+
+        computePass.setPipeline(preprocessPipeline);
+        computePass.setBindGroup(0, gaussianBindGroup);
+        computePass.setBindGroup(1, sortBindGroup);
+        computePass.dispatchWorkgroups(Math.ceil(pc.num_points / C.histogram_wg_size), 1, 1);
+        computePass.end();
+      }
+
+      // Preprocess assigns the sort.num_keys
+      encoder.copyBufferToBuffer(
+        sorter.sort_info_buffer,
+        0,
+        indirectDrawBuffer,
+        // First u32 uses 4 bytes, need to offset to write to that stuff
+        4,
+        // Need to write 4 bytes, size of u32 atomic keys_size
+        4
+      );
+
+      // Sort pass using preprocessed sort information
       sorter.sort(encoder);
 
       // TODO: Verify that this actually works

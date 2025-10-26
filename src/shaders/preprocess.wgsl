@@ -67,6 +67,8 @@ struct Splat {
 @group(0) @binding(0) var<storage, read> gaussians : array<Gaussian>;
 @group(0) @binding(1) var<storage, read_write> splats : array<Splat>;
 @group(0) @binding(2) var<uniform> camera: CameraUniforms;
+@group(0) @binding(3) var<storage, read> shBuffer : array<u32>;
+@group(0) @binding(4) var<uniform> renderSettings: RenderSettings;
 
 @group(1) @binding(0) var<storage, read_write> sort_infos: SortInfos;
 @group(1) @binding(1) var<storage, read_write> sort_depths : array<u32>;
@@ -74,9 +76,29 @@ struct Splat {
 @group(1) @binding(3) var<storage, read_write> sort_dispatch: DispatchIndirect;
 
 /// reads the ith sh coef from the storage buffer 
-fn sh_coef(splat_idx: u32, c_idx: u32) -> vec3<f32> {
+fn sh_coef(splatIdx: u32, c_idx: u32) -> vec3<f32> {
     //TODO: access your binded sh_coeff, see load.ts for how it is stored
-    return vec3<f32>(0.0);
+
+    // This should correspond with the # of coeffs in total stored
+    // 16 coeffs stored per gaussian, 3 channels for RGB
+    // It's a Float16 instead of Float32, so divide by half
+    // Overall, 3 * 16 / 2 = 24
+    let offsetSize = 24u;
+    var shIdx : u32 = splatIdx * u32(offsetSize);
+
+    // Need to find the first float
+    shIdx += (c_idx / 2) * 3;
+
+    // Depending on (xy, z) or (z, xy), need to offset the float
+    shIdx += (c_idx % 2u);
+
+    // I think we need to know the order of the sh_coeff, don't we?
+    // Unless we assume it's max order, not sure.
+    let f0xy : vec2f = unpack2x16float(shBuffer[shIdx]);
+    let f1zw : vec2f = unpack2x16float(shBuffer[shIdx + 1]);
+
+    let color = select(vec3f(f0xy, f1zw.x), vec3f(f0xy.y, f1zw), c_idx % 2u == 1u);
+    return color;
 }
 
 // spherical harmonics evaluation with Condon–Shortley phase
@@ -112,12 +134,6 @@ fn computeColorFromSH(dir: vec3<f32>, v_idx: u32, sh_deg: u32) -> vec3<f32> {
     return  max(vec3<f32>(0.), result);
 }
 
-fn computeGaussianBBIntersection(position: vec3f, viewMatrix: mat4x4f, projMatrix: mat4x4f, pView: vec3f) -> bool {
-    // points to screenspace
-    return true;
-}
-
-
 fn quaternionToRotationMatrix(quaternion: vec4f) -> mat3x3f {
     // I don't like this, but it's the style of the Inria paper code
     let r = quaternion.x;
@@ -138,9 +154,9 @@ fn quaternionToRotationMatrix(quaternion: vec4f) -> mat3x3f {
 
 fn buildScaleMatrix(scale: vec4f) -> mat3x3f {
     // somehow grab gaussian uniforms when it's populated
-    let column0 = vec3f(scale.x, 0f, 0f);
-    let column1 = vec3f(0f, scale.y, 0f);
-    let column2 = vec3f(0f, 0f, scale.z);
+    let column0 = vec3f(exp(scale.x), 0f, 0f);
+    let column1 = vec3f(0f, exp(scale.y), 0f);
+    let column2 = vec3f(0f, 0f, exp(scale.z));
     return mat3x3f(column0, column1, column2);
 }
 
@@ -152,46 +168,56 @@ fn preprocess(@builtin(global_invocation_id) gid: vec3<u32>, @builtin(num_workgr
     // Somehow... we do frustum culling
     let gaussian = gaussians[idx];
 
+    // TODO: return if idx is beyond the number of gaussians?
+    if (idx >= arrayLength(&gaussians))
+    {
+        return;
+    }
+
     let xy = unpack2x16float(gaussian.packedPositionOpacity[0]);
     let za = unpack2x16float(gaussian.packedPositionOpacity[1]);
+
     let worldPos = vec4<f32>(xy[0], xy[1], za[0], 1.);
+    let sigmoidOpacity = 1f / (1f + exp(-za[1]));
 
     // Project gaussian world position to NDC?
     let projPosW : vec4f = camera.proj * camera.view * vec4f(worldPos);
     let projPos : vec4f = projPosW / projPosW.w;
 
+    // Simple cull, any instructions executed after this point is assumed to be a visible gaussian
+    if (projPos.x < -1.2f || projPos.x > 1.2f || projPos.y < -1.2f || projPos.y > 1.2f)
+    {
+        return;
+    }
+
     // Compute covariance 3D matrix
     let quaternion : vec4f = vec4f(unpack2x16float(gaussian.rot[0]), unpack2x16float(gaussian.rot[1]));
-    let scale : vec4f = vec4f(unpack2x16float(gaussian.scale[0]), unpack2x16float(gaussian.scale[1]));
+    let logScale : vec4f = vec4f(unpack2x16float(gaussian.scale[0]), unpack2x16float(gaussian.scale[1]));
 
     let rotMat = quaternionToRotationMatrix(quaternion);
-    let scaleMat = buildScaleMatrix(scale);
+    let scaleMat = buildScaleMatrix(logScale);
 
     let m : mat3x3f = scaleMat * rotMat;
     let sigma : mat3x3f = transpose(m) * m;
 
     // Cov3D construction
-    let cov3DA = vec4f(sigma[0][0], sigma[0][1], sigma[0][2], sigma[1][0]);
-    let cov3DB = vec4f(sigma[1][1], sigma[1][2], 0f, 0f);
+    let cov3DA = vec4f(sigma[0][0], sigma[0][1], sigma[0][2], sigma[1][1]);
+    let cov3DB = vec4f(sigma[1][2], sigma[2][2], 0f, 0f);
+
+    let Vrk : mat3x3f = mat3x3f(
+        vec3f(sigma[0][0], sigma[0][1], sigma[0][2]),
+        vec3f(sigma[0][1], sigma[1][1], sigma[1][2]),
+        vec3f(sigma[0][2], sigma[1][2], sigma[2][2])
+    );
 
     // Cov2D computation
     var t : vec3f = (camera.view * worldPos).xyz;
-    let xInvTanFOVDiv2 = camera.proj[0][0];
-    let yInvTanFOVDiv2 = camera.proj[1][1];
-    
-    let limX = 1.3f * (1.0f / xInvTanFOVDiv2);
-    let limY = 1.3f * (1.0f / yInvTanFOVDiv2);
-    let txtz = t.x / t.z;
-    let tytz = t.y / t.z;
-
-    t.x = min(limX, max(-limX, txtz)) * t.z;
-    t.y = min(limY, max(-limY, tytz)) * t.z;
 
     // I'm just going to let God take care of this one!
     let J : mat3x3f = mat3x3f(
-        vec3f(camera.focal.x / t.z, 0f, -(camera.focal.x * t.x) / (t.z * t.z)),
-        vec3f(0f, camera.focal.y / t.z, -(camera.focal.y * t.y) / (t.z * t.z)),
-        vec3f(0f, 0f, 0f)
+        vec3f(camera.focal.x / t.z, 0f, 0f),
+        vec3f(0f, camera.focal.y / t.z, 0f),
+        vec3f(-(camera.focal.x * t.x) / (t.z * t.z), -(camera.focal.y * t.y) / (t.z * t.z), 0f)
     );
 
     let W : mat3x3f = mat3x3f(
@@ -201,13 +227,8 @@ fn preprocess(@builtin(global_invocation_id) gid: vec3<u32>, @builtin(num_workgr
     );
 
     let T : mat3x3f = W * J;
-    let Vrk : mat3x3f = mat3x3f(
-        vec3f(cov3DA.x, cov3DA.y, cov3DA.z),
-        vec3f(cov3DA.y, cov3DA.w, cov3DB.x),
-        vec3f(cov3DA.z, cov3DB.x, cov3DB.y)
-    );
 
-    var cov : mat3x3f = J * W * Vrk * transpose(W) * transpose(J);
+    var cov : mat3x3f = transpose(T) * transpose(Vrk) * T;
     cov[0][0] += 0.3f;
     cov[1][1] += 0.3f;
 
@@ -229,15 +250,24 @@ fn preprocess(@builtin(global_invocation_id) gid: vec3<u32>, @builtin(num_workgr
 
     let radius = ceil(3f * sqrt(max(lambda1, lambda2)));
     let ndc_position = vec2f(projPos.x, projPos.y);
-    let color : vec3f = computeColorFromSH(normalize(worldPos.xyz), idx, 0u);
 
-    splats[idx].radius = radius;
-    splats[idx].ndc_position = ndc_position;
-    splats[idx].color = vec4f(color, 1f);
-    splats[idx].conicAndOpacity = vec4f(conic, za[1]);
+    // We use atomic add on keys_size, and this way we have the # of splats to sort at the end of preprocess compute run
+    let sortedIdx = atomicAdd(&sort_infos.keys_size, 1);
+    
+    splats[sortedIdx].radius = radius;
+    splats[sortedIdx].ndc_position = ndc_position;
+    splats[sortedIdx].color = vec4f(computeColorFromSH(normalize(worldPos.xyz - -camera.view[3].xyz), idx, u32(renderSettings.sh_deg)), 1f);
+    splats[sortedIdx].conicAndOpacity = vec4f(conic, sigmoidOpacity );
 
-    let keys_per_dispatch = workgroupSize * sortKeyPerThread; 
     // increment DispatchIndirect.dispatchx each time you reach limit for one dispatch of keys
-
-    // dude what the hell is dispatchIndirect and why does the base code just not talk about it at all??
+    let keys_per_dispatch = workgroupSize * sortKeyPerThread; 
+    if (sortedIdx % keys_per_dispatch == 0)
+    {
+        atomicAdd(&sort_dispatch.dispatch_x, 1);
+    }
+    
+    // [0.01f, 100f] range
+    let depth = -(camera.view * worldPos).z;
+    sort_depths[sortedIdx] = u32(100f + 10f * depth);
+    sort_indices[sortedIdx] = sortedIdx;
 }
