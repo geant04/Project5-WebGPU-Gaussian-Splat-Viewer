@@ -40,6 +40,7 @@ To analyze performance, I tested differences in performance based on workgroup-s
 For my workgroup test, I used the bonsai scene. As workgroup-size increased, I did not notice any sizable differences in performance for preprocess from 64 to 256. In addition, performance neared around my refresh rate (240hz), so I wasn't able to get too much useful information, but there is a general trend of better performance as workgroup size increases.
 
 ![](images/wkg.png)
+
 This can mostly be attributed to better compute throughput from an increase workgroup size. I'm not sure if cache coherency may be better, since we have an array of structs for storing gaussian data as opposed to arrays of data, but it's possible that there may be better cache use from having a larger workgroup size too.
 
 A very simple test I did to test culling is by moving my camera backwards to completely avoid any splats, and I did this for the bike scene.
