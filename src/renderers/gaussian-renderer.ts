@@ -301,7 +301,8 @@ export default function get_renderer(
         computePass.setPipeline(preprocessPipeline);
         computePass.setBindGroup(0, gaussianBindGroup);
         computePass.setBindGroup(1, sortBindGroup);
-        computePass.dispatchWorkgroups(Math.ceil(pc.num_points / C.histogram_wg_size), 1, 1);
+        
+        computePass.dispatchWorkgroups(Math.ceil(pc.num_points / 32), 1, 1);
         computePass.end();
       }
 
