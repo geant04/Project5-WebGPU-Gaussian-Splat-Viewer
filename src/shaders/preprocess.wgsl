@@ -146,9 +146,9 @@ fn quaternionToRotationMatrix(quaternion: vec4f) -> mat3x3f {
     let column2 = vec3f(2f * (x * z + r * y), 2f * (y * z - r * x), 1f - 2f * (x * x + y * y));
 
     return mat3x3f(
-        column0,
-        column1,
-        column2
+		1.f - 2.f * (y * y + z * z), 2.f * (x * y - r * z), 2.f * (x * z + r * y),
+		2.f * (x * y + r * z), 1.f - 2.f * (x * x + z * z), 2.f * (y * z - r * x),
+		2.f * (x * z - r * y), 2.f * (y * z + r * x), 1.f - 2.f * (x * x + y * y)
     );
 }
 
@@ -205,9 +205,9 @@ fn preprocess(@builtin(global_invocation_id) gid: vec3<u32>, @builtin(num_workgr
     let cov3DB = vec4f(sigma[1][2], sigma[2][2], 0f, 0f);
 
     let Vrk : mat3x3f = mat3x3f(
-        vec3f(sigma[0][0], sigma[0][1], sigma[0][2]),
-        vec3f(sigma[0][1], sigma[1][1], sigma[1][2]),
-        vec3f(sigma[0][2], sigma[1][2], sigma[2][2])
+        sigma[0][0], sigma[0][1], sigma[0][2],
+        sigma[0][1], sigma[1][1], sigma[1][2],
+        sigma[0][2], sigma[1][2], sigma[2][2]
     );
 
     // Cov2D computation
@@ -215,9 +215,9 @@ fn preprocess(@builtin(global_invocation_id) gid: vec3<u32>, @builtin(num_workgr
 
     // I'm just going to let God take care of this one!
     let J : mat3x3f = mat3x3f(
-        vec3f(camera.focal.x / t.z, 0f, 0f),
-        vec3f(0f, camera.focal.y / t.z, 0f),
-        vec3f(-(camera.focal.x * t.x) / (t.z * t.z), -(camera.focal.y * t.y) / (t.z * t.z), 0f)
+        camera.focal.x / t.z, 0f, -(camera.focal.x * t.x) / (t.z * t.z),
+        0f, camera.focal.y / t.z, -(camera.focal.y * t.y) / (t.z * t.z),
+        0f, 0f, 0f
     );
 
     let W : mat3x3f = mat3x3f(
@@ -226,7 +226,7 @@ fn preprocess(@builtin(global_invocation_id) gid: vec3<u32>, @builtin(num_workgr
         vec3f(camera.view[2][0], camera.view[2][1], camera.view[2][2])
     );
 
-    let T : mat3x3f = W * J;
+    let T : mat3x3f = transpose(W) * J;
 
     var cov : mat3x3f = transpose(T) * transpose(Vrk) * T;
     cov[0][0] += 0.3f;
@@ -256,7 +256,7 @@ fn preprocess(@builtin(global_invocation_id) gid: vec3<u32>, @builtin(num_workgr
     
     splats[sortedIdx].radius = radius;
     splats[sortedIdx].ndc_position = ndc_position;
-    splats[sortedIdx].color = vec4f(computeColorFromSH(normalize(worldPos.xyz - -camera.view[3].xyz), idx, u32(renderSettings.sh_deg)), 1f);
+    splats[sortedIdx].color = vec4f(computeColorFromSH(normalize(worldPos.xyz - camera.view[3].xyz), idx, u32(renderSettings.sh_deg)), 1f);
     splats[sortedIdx].conicAndOpacity = vec4f(conic, sigmoidOpacity );
 
     // increment DispatchIndirect.dispatchx each time you reach limit for one dispatch of keys
@@ -267,7 +267,7 @@ fn preprocess(@builtin(global_invocation_id) gid: vec3<u32>, @builtin(num_workgr
     }
     
     // [0.01f, 100f] range
-    let depth = -(camera.view * worldPos).z;
-    sort_depths[sortedIdx] = u32(100f + 10f * depth);
+    let depth = (camera.view * worldPos).z;
+    sort_depths[sortedIdx] = bitcast<u32>(100f - depth);
     sort_indices[sortedIdx] = sortedIdx;
 }

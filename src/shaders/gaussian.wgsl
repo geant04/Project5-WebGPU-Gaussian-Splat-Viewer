@@ -68,7 +68,9 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
     let pixelPosition : vec2f = in.position.xy;
     let conic : vec3f = in.conic;
 
-    let d = pixelPosition - splatPixelPosition;
+    // This already handles the flipped y, we do splat - pixel to flip x as well
+    let d = splatPixelPosition - pixelPosition;
+
     let power : f32 = -0.5f * (conic.x * d.x * d.x + conic.z * d.y * d.y) - conic.y * d.x * d.y;
     if (power > 0f)
     {

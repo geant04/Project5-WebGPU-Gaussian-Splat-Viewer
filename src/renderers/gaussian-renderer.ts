@@ -8,19 +8,6 @@ export interface GaussianRenderer extends Renderer {
 
 }
 
-// Utility to create GPU buffers
-// const createBuffer = (
-//   device: GPUDevice,
-//   label: string,
-//   size: number,
-//   usage: GPUBufferUsageFlags,
-//   data?: ArrayBuffer | ArrayBufferView
-// ) => {
-//   const buffer = device.createBuffer({ label, size, usage });
-//   if (data) device.queue.writeBuffer(buffer, 0, data);
-//   return buffer;
-// };
-
 export default function get_renderer(
   pc: PointCloud,
   device: GPUDevice,
@@ -35,8 +22,6 @@ export default function get_renderer(
   // ===============================================
   const nulling_data = new Uint32Array([0]);
 
-  // Somehow we need to know the number of splats there are, no?
-  // This needs to be updated dynamically by the GPU culling stage
   const numSplats = pc.num_points;
   const floatsPerSplat = 4 + 4 + 4;
   const splats = new Float32Array(numSplats * floatsPerSplat);
